@@ -1,0 +1,44 @@
+# Configuracion principal del pipeline ETL para la Escuela Politecnica Nacional (EPN)
+project:
+  name: "epn-dwh-scraper"
+  version: "1.0.0"
+  description: "Pipeline de extraccion, limpieza y carga de datos institucionales de la EPN para Data Warehouse dimensional"
+
+network:
+  base_url: "https://www.epn.edu.ec"
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 EPN-Academic-BI/1.0"
+  timeout_seconds: 15
+  rate_limit_seconds: 1.0
+  max_retries: 4
+  backoff_factor: 1.5
+  use_cache: true
+  verify_ssl: false
+
+endpoints:
+  robots_txt: "https://www.epn.edu.ec/robots.txt"
+  facultades: "https://www.epn.edu.ec/facultades/"
+  oferta_grado: "https://www.epn.edu.ec/oferta-de-grado/"
+  oferta_posgrado: "https://www.epn.edu.ec/oferta-de-posgrado/"
+  autoridades: "https://www.epn.edu.ec/autoridades/"
+  historia: "https://www.epn.edu.ec/historia/"
+  nosotros: "https://www.epn.edu.ec/nosotros/"
+  investigacion_cifras: "https://www.epn.edu.ec/investigacion-en-cifras/"
+  laboratorios_institucionales: "https://www.epn.edu.ec/laboratorios_institucionales/"
+  noticias_web: "https://www.epn.edu.ec/noticias/"
+  noticias_api: "https://www.epn.edu.ec/wp-json/wp/v2/posts"
+
+paths:
+  data_raw: "data/raw"
+  data_interim: "data/interim"
+  data_processed: "data/processed"
+  logs: "logs"
+  database: "data/epn_dwh.db"
+
+storage:
+  database_url: "sqlite:///data/epn_dwh.db"
+  encoding: "utf-8"
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+  file_name: "logs/scraper_execution.log"
