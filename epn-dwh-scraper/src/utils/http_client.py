@@ -7,6 +7,7 @@ cabeceras identificables para fines academicos.
 """
 
 import hashlib
+import json
 import re
 import time
 import urllib.robotparser
@@ -28,8 +29,14 @@ logger = setup_logger("http_client")
 class HttpClient:
     """Gestiona las peticiones web respetando directivas eticas y tecnicas."""
 
-    def __init__(self) -> None:
-        """Inicializa la sesion HTTP, el parser de robots.txt y el control de frecuencia."""
+    def __init__(self, use_cache: Optional[bool] = None, force_refresh: bool = False) -> None:
+        """Inicializa la sesion HTTP, el parser de robots.txt y el control de frecuencia.
+
+        Args:
+            use_cache (Optional[bool]): Sobrescribe el uso de cache de la configuracion (--no-cache).
+            force_refresh (bool): Si es True, ignora la cache existente y vuelve a descargar (--force-refresh).
+        """
+        self.force_refresh = force_refresh
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": settings.user_agent,
@@ -39,10 +46,11 @@ class HttpClient:
         self.rate_limit_seconds = settings.rate_limit_seconds
         self.last_request_time = 0.0
         self.raw_dir = settings.data_raw_dir
-        self.use_cache = settings.use_cache
+        self.use_cache = settings.use_cache if use_cache is None else use_cache
 
         # Parser de robots.txt
         self._robot_parser: Optional[urllib.robotparser.RobotFileParser] = None
+        self._robots_unreachable = False
         self._init_robots_txt()
 
     def _init_robots_txt(self) -> None:
@@ -58,10 +66,15 @@ class HttpClient:
                 self._robot_parser = urllib.robotparser.RobotFileParser()
                 self._robot_parser.parse(response.text.splitlines())
                 logger.info(f"Archivo robots.txt procesado exitosamente desde: {robots_url}")
+            elif 400 <= response.status_code < 500:
+                # RFC 9309: robots.txt inexistente equivale a sin restricciones
+                logger.warning(f"robots.txt no disponible (HTTP {response.status_code}); se asume sin restricciones.")
             else:
-                logger.warning(f"No fue posible obtener robots.txt (Codigo HTTP: {response.status_code})")
+                self._robots_unreachable = True
+                logger.error(f"robots.txt devolvio HTTP {response.status_code}; se suspende el rastreo.")
         except Exception as exc:
-            logger.warning(f"Error al inicializar robots.txt: {exc}. Se procedera con precaucion.")
+            self._robots_unreachable = True
+            logger.error(f"No fue posible leer robots.txt ({exc}); se suspende el rastreo por precaucion.")
 
     def is_allowed(self, url: str) -> bool:
         """Verifica si la URL esta permitida para rastreo segun robots.txt.
@@ -70,8 +83,11 @@ class HttpClient:
             url (str): Direccion URL completa a evaluar.
 
         Returns:
-            bool: True si esta permitida o si no se pudo cargar robots.txt, False si esta prohibida.
+            bool: True si esta permitida; False si esta prohibida o si robots.txt no pudo consultarse
+            por error de red o de servidor.
         """
+        if self._robots_unreachable:
+            return False
         if self._robot_parser is None:
             return True
         return self._robot_parser.can_fetch(settings.user_agent, url)
@@ -100,6 +116,23 @@ class HttpClient:
         filename = f"{slug}_{url_hash}.{extension}"
         return self.raw_dir / filename
 
+    def _cache_is_fresh(self, cache_path: Path) -> bool:
+        """Indica si existe una entrada de cache cuya antiguedad no supera el TTL configurado.
+
+        Args:
+            cache_path (Path): Ruta del archivo de cache.
+
+        Returns:
+            bool: True si el archivo existe y esta vigente.
+        """
+        if not cache_path.exists():
+            return False
+        ttl_hours = settings.cache_ttl_hours
+        if ttl_hours <= 0:
+            return True
+        age_hours = (time.time() - cache_path.stat().st_mtime) / 3600
+        return age_hours <= ttl_hours
+
     def get(self, url: str, use_cache: Optional[bool] = None, force_refresh: bool = False) -> Optional[str]:
         """Realiza una peticion GET retornando el texto de la respuesta con manejo de cache y reintentos.
 
@@ -118,7 +151,7 @@ class HttpClient:
         should_cache = self.use_cache if use_cache is None else use_cache
         cache_path = self._get_cache_path(url, extension="html")
 
-        if should_cache and not force_refresh and cache_path.exists():
+        if should_cache and not (force_refresh or self.force_refresh) and self._cache_is_fresh(cache_path):
             logger.debug(f"Cargando recurso desde cache local: {cache_path.name}")
             try:
                 return cache_path.read_text(encoding="utf-8", errors="ignore")
@@ -178,18 +211,16 @@ class HttpClient:
         Returns:
             Optional[dict]: Diccionario o lista decodificada, o None si hay error.
         """
-        import json
-
         should_cache = self.use_cache if use_cache is None else use_cache
         cache_path = self._get_cache_path(url, extension="json")
 
-        if should_cache and cache_path.exists():
+        if should_cache and not self.force_refresh and self._cache_is_fresh(cache_path):
             try:
                 return json.loads(cache_path.read_text(encoding="utf-8"))
             except Exception:
                 pass
 
-        text = self.get(url, use_cache=False)
+        text = self.get(url, use_cache=False, force_refresh=True)
         if text:
             try:
                 data = json.loads(text)

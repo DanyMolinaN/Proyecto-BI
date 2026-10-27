@@ -118,21 +118,13 @@ class AutoridadesScraper(BaseScraper):
         """
         # Extraer grado de prefijo
         prefix_match = re.match(r"^(Dr\.|Dra\.|Ing\.|Msc\.|Ph\.D\.|Lic\.)\s*", name)
-        titulo_academico = prefix_match.group(0).strip() if prefix_match else "Especialista"
+        titulo_academico = prefix_match.group(0).strip() if prefix_match else None
 
         # Identificar si es encargado (E) o titular
         es_titular = 0 if "(E)" in cargo or "subrogante" in cargo.lower() else 1
 
-        # Email sugerido
+        # El correo solo se registra si aparece en la fuente; nunca se infiere
         email_clean = extract_email(bio)
-        if not email_clean:
-            cargo_slug = re.sub(r"[^a-zA-Z]", "", cargo.lower())
-            if "rector" in cargo_slug:
-                email_clean = "rectorado@epn.edu.ec"
-            elif "vicerrector" in cargo_slug:
-                email_clean = "vicerrectorado@epn.edu.ec"
-            else:
-                email_clean = "autoridad@epn.edu.ec"
 
         return {
             "nombre_completo": name,
@@ -141,9 +133,9 @@ class AutoridadesScraper(BaseScraper):
             "tipo_cargo": "Alta Direccion" if any(k in cargo.lower() for k in ["rector", "vicerrector"]) else "Decanal",
             "unidad_adscripcion": unidad,
             "es_titular": es_titular,
-            "periodo_gestion": "2023 - 2028 (Vigente)",
+            "periodo_gestion": None,
             "correo_contacto": email_clean,
-            "biografia": bio[:800] if bio else "Profesor titular e investigador de la Escuela Politecnica Nacional.",
+            "biografia": bio[:800] if bio else None,
             "fuente_url": url,
         }
 
@@ -205,20 +197,5 @@ class AutoridadesScraper(BaseScraper):
             if norm_name not in seen:
                 seen.add(norm_name)
                 all_authorities.append(auth)
-
-        # Garantizar autoridades institucionales minimas verificadas en el portal si hubo variacion en selectores
-        if len(all_authorities) < 3:
-            self.logger.warning("Inyectando autoridades minimas canónicas verificadas en portal.")
-            canonicas = [
-                self._build_record("Dr. Tarquino Sanchez Almeida", "Rector", "Rectorado", "Doctor en Investigacion Educativa, Magister en Gerencia Empresarial.", "https://www.epn.edu.ec/autoridades/"),
-                self._build_record("Dra. Rosa Navarrete", "Vicerrectora de Docencia (E)", "Vicerrectorado de Docencia", "Doctora en Informatica, investigadora y docente titular.", "https://www.epn.edu.ec/autoridades/"),
-                self._build_record("Dr. Mario Ruiz Romero", "Vicerrector (E) de Investigacion", "Vicerrectorado de Investigacion, Innovacion y Vinculacion", "Sismologo, Doctor en Geofisica.", "https://www.epn.edu.ec/autoridades/"),
-                self._build_record("Dr. Juan Pablo Diaz", "Decano", "Facultad de Ciencias", "Doctor en Economia por la Universidad de Barcelona.", "https://www.epn.edu.ec/autoridades/"),
-                self._build_record("Dr. Alex Davila Frias", "Decano", "Facultad de Ciencias Administrativas", "Especialista en administracion publica y finanzas.", "https://www.epn.edu.ec/autoridades/"),
-                self._build_record("Dr. Jorge Toapaxi", "Decano", "Facultad de Ingenieria Civil y Ambiental", "Docente e investigador en ingenieria estructural.", "https://www.epn.edu.ec/autoridades/"),
-            ]
-            for c in canonicas:
-                if c["nombre_completo"].lower() not in seen:
-                    all_authorities.append(c)
 
         return all_authorities

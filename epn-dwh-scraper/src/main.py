@@ -21,6 +21,7 @@ from src.scrapers.facultades_scraper import FacultadesScraper
 from src.scrapers.institucional_scraper import InstitucionalScraper
 from src.scrapers.noticias_scraper import NoticiasScraper
 from src.transform.cleaning import DataCleaner
+from src.transform.scd2 import apply_scd2
 from src.transform.validation import DataValidator
 from src.utils.http_client import HttpClient
 from src.utils.logger import setup_logger
@@ -40,7 +41,7 @@ class ETLPipeline:
         """
         self.use_cache = use_cache
         self.force_refresh = force_refresh
-        self.http_client = HttpClient()
+        self.http_client = HttpClient(use_cache=use_cache, force_refresh=force_refresh)
         self.cleaner = DataCleaner()
         self.validator = DataValidator()
         self.csv_loader = CsvLoader()
@@ -111,7 +112,7 @@ class ETLPipeline:
         tables: Dict[str, pd.DataFrame] = {}
 
         # 1. Dimension Tiempo
-        df_dim_tiempo = self.cleaner.build_dim_tiempo(2023, 2027)
+        df_dim_tiempo = self.cleaner.build_dim_tiempo()
         tables["dim_tiempo"] = df_dim_tiempo
         self.validator.profile_dataframe(df_dim_tiempo, "dim_tiempo", "tiempo_key", ["tiempo_key", "fecha", "anio"])
 
@@ -132,18 +133,30 @@ class ETLPipeline:
         self.validator.profile_dataframe(df_dim_car, "dim_carrera", "carrera_key", ["carrera_key", "nombre_carrera"])
         self.validator.profile_dataframe(df_dim_niv, "dim_nivel_formacion", "nivel_key", ["nivel_key", "nombre_nivel"])
         self.validator.profile_dataframe(df_dim_mod, "dim_modalidad", "modalidad_key", ["modalidad_key", "nombre_modalidad"])
-        self.validator.profile_dataframe(df_fact_ofe, "fact_oferta_academica", "oferta_key", ["oferta_key", "carrera_key", "facultad_key"])
+        self.validator.profile_dataframe(
+            df_fact_ofe, "fact_oferta_academica", "oferta_key", ["oferta_key", "carrera_key"],
+            foreign_keys={"facultad_key": (df_dim_facultad, "facultad_key"), "tiempo_extraccion_key": (df_dim_tiempo, "tiempo_key")},
+        )
 
         # 4. Autoridades, Cargos y Hechos Autoridades
         raw_aut = raw_data.get("autoridades", [])
         df_dim_aut, df_dim_car_cargo, df_fact_aut = self.cleaner.clean_autoridades(raw_aut, df_dim_facultad)
+
+        # SCD Tipo 2: reconciliar con el historial ya cargado en la base de datos
+        existing_aut = self.db_loader.read_table("dim_autoridad")
+        existing_fact_aut = self.db_loader.read_table("fact_designacion_autoridades")
+        df_dim_aut, df_fact_aut = apply_scd2(df_dim_aut, df_fact_aut, existing_aut, existing_fact_aut)
+
         tables["dim_autoridad"] = df_dim_aut
         tables["dim_cargo"] = df_dim_car_cargo
         tables["fact_designacion_autoridades"] = df_fact_aut
 
         self.validator.profile_dataframe(df_dim_aut, "dim_autoridad", "autoridad_key", ["autoridad_key", "nombre_completo"])
         self.validator.profile_dataframe(df_dim_car_cargo, "dim_cargo", "cargo_key", ["cargo_key", "nombre_cargo"])
-        self.validator.profile_dataframe(df_fact_aut, "fact_designacion_autoridades", "designacion_key", ["designacion_key", "autoridad_key", "cargo_key"])
+        self.validator.profile_dataframe(
+            df_fact_aut, "fact_designacion_autoridades", "designacion_key", ["designacion_key", "autoridad_key", "cargo_key"],
+            foreign_keys={"autoridad_key": (df_dim_aut, "autoridad_key"), "cargo_key": (df_dim_car_cargo, "cargo_key")},
+        )
 
         # 5. Noticias y Hechos Comunicacion
         raw_not = raw_data.get("noticias", [])
@@ -152,7 +165,10 @@ class ETLPipeline:
         tables["fact_comunicacion_institucional"] = df_fact_not
 
         self.validator.profile_dataframe(df_dim_cat, "dim_categoria_noticia", "categoria_key", ["categoria_key", "nombre_categoria"])
-        self.validator.profile_dataframe(df_fact_not, "fact_comunicacion_institucional", "noticia_key", ["noticia_key", "categoria_key"])
+        self.validator.profile_dataframe(
+            df_fact_not, "fact_comunicacion_institucional", "noticia_key", ["noticia_key", "categoria_key"],
+            foreign_keys={"tiempo_publicacion_key": (df_dim_tiempo, "tiempo_key"), "categoria_key": (df_dim_cat, "categoria_key")},
+        )
 
         # 6. Informacion Institucional General (Tabla complementaria)
         raw_inst = raw_data.get("institucional", [])

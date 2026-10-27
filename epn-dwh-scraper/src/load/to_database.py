@@ -9,7 +9,7 @@ de integridad tras la insercion.
 from pathlib import Path
 from typing import Dict, Optional
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import Engine
 
 from src.config import settings
@@ -54,6 +54,23 @@ class DatabaseLoader:
                     conn.execute(text(clean_stmt))
 
         logger.info(f"Ejecutado satisfactoriamente el script SQL: {sql_file_path.name}")
+
+    def read_table(self, table_name: str) -> Optional[pd.DataFrame]:
+        """Lee una tabla existente; devuelve None si la tabla o la base de datos aun no existen.
+
+        Args:
+            table_name (str): Nombre de la tabla.
+
+        Returns:
+            Optional[pd.DataFrame]: Contenido de la tabla o None.
+        """
+        try:
+            if not inspect(self.engine).has_table(table_name):
+                return None
+            return pd.read_sql_table(table_name, con=self.engine)
+        except Exception as exc:
+            logger.warning(f"No se pudo leer la tabla existente '{table_name}': {exc}")
+            return None
 
     def load_table(self, df: pd.DataFrame, table_name: str, if_exists: str = "replace") -> int:
         """Inserta o reemplaza una tabla en la base de datos de manera idempotente.
@@ -106,18 +123,8 @@ class DatabaseLoader:
             Dict[str, int]: Tabla y conteo de filas actual.
         """
         counts = {}
+        quote = self.engine.dialect.identifier_preparer.quote
         with self.engine.connect() as conn:
-            # Inspeccionar tablas existentes segun dialecto
-            if "sqlite" in self.engine.url.drivername:
-                res = conn.execute(text("SELECT name FROM sqlite_master WHERE type='table';"))
-                tables = [r[0] for r in res]
-            else:
-                res = conn.execute(text("SELECT table_name FROM information_schema.tables WHERE table_schema='public';"))
-                tables = [r[0] for r in res]
-
-            for t in tables:
-                if not t.startswith("sqlite_"):
-                    c_res = conn.execute(text(f"SELECT COUNT(*) FROM {t};"))
-                    counts[t] = c_res.scalar()
-
+            for table in inspect(self.engine).get_table_names():
+                counts[table] = conn.execute(text(f"SELECT COUNT(*) FROM {quote(table)}")).scalar()
         return counts

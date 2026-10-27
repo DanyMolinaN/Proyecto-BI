@@ -12,117 +12,102 @@ from bs4 import BeautifulSoup
 
 from src.config import settings
 from src.scrapers.base_scraper import BaseScraper
-from src.utils.helpers import clean_text
+from src.utils.helpers import clean_text, extract_labeled_value, page_lines, remove_accents
 
 
 class InstitucionalScraper(BaseScraper):
     """Extrae las dimensiones institucionales, historicas y cientificas de la universidad."""
 
     def _extract_nosotros(self) -> Dict[str, Any]:
-        """Extrae principios, mision, vision y valores desde el endpoint nosotros.
+        """Extrae principios, mision, vision y valores desde la pagina "nosotros".
+
+        La pagina publica cada bloque como un encabezado ("MISION", "VISION", "Valores") seguido
+        de su texto en la linea siguiente. Lo que no se encuentra queda en None (sin valores por defecto).
 
         Returns:
-            Dict[str, Any]: Estructura con declaraciones filosoficas institucionales.
+            Dict[str, Any]: mision, vision, valores, principios y fuente_url.
         """
         url = settings.endpoints.get("nosotros", f"{settings.base_url}/nosotros/")
         html_content = self.http_client.get(url)
+        empty = {"mision": None, "vision": None, "valores": None, "principios": None, "fuente_url": url}
         if not html_content:
-            return {
-                "mision": "Formar profesionales de excelencia y generar investigacion cientifica.",
-                "vision": "Ser una institucion lider en educacion superior y desarrollo tecnologico.",
-                "valores": "Excelencia, Integridad, Resiliencia, Compromiso Social",
-                "principios": "Autonomia, Libertad de Catedra, Igualdad de Oportunidades",
-                "fuente_url": url,
-            }
+            self.logger.warning(f"No se pudo obtener {url}; se omite mision, vision y valores.")
+            return empty
 
-        soup = BeautifulSoup(html_content, "html.parser")
-        text_all = soup.get_text()
+        lines = page_lines(BeautifulSoup(html_content, "html.parser"))
+        norms = [remove_accents(l).lower().strip() for l in lines]
 
-        # Extraer bloques de mision y vision
-        mision = ""
-        vision = ""
-        for p in soup.find_all(["p", "div"]):
-            t = clean_text(p.get_text())
-            if not mision and "misión" in t.lower() and len(t) > 30:
-                mision = t
-            elif not vision and "visión" in t.lower() and len(t) > 30:
-                vision = t
+        mision = extract_labeled_value(lines, "Mision")
+        vision = extract_labeled_value(lines, "Vision")
 
-        if not mision:
-            mision = "La Escuela Politecnica Nacional es una institucion publica de educacion superior que forma profesionales e investigadores en ciencias, ingenieria y tecnologia con excelencia academica y compromiso etico."
-        if not vision:
-            vision = "Ser una universidad de docencia con investigacion, referente a nivel nacional e internacional, comprometida con la solucion de los grandes problemas de la sociedad."
+        # Principios: parrafos entre el encabezado "Principios" y "MISION"
+        principios = None
+        if "mision" in norms:
+            end = norms.index("mision")
+            starts = [i for i in range(end) if norms[i] == "principios"]
+            if starts:
+                principios = clean_text(" ".join(lines[starts[-1] + 1:end])) or None
 
-        # Extraer valores institucionales
+        # Valores: nombres cortos (una palabra o dos) entre "Institucionales" y "Plan Estrategico"
         valores: List[str] = []
-        for h in soup.find_all(["h3", "h4", "strong"]):
-            t = clean_text(h.get_text())
-            if t in ["Excelencia", "Resiliencia", "Integridad", "Compromiso", "Pluralismo", "Solidaridad", "Transparencia"]:
-                if t not in valores:
-                    valores.append(t)
-
-        if not valores:
-            valores = ["Excelencia", "Resiliencia", "Integridad", "Responsabilidad Social", "Innovacion"]
+        if "institucionales" in norms:
+            start = norms.index("institucionales") + 1
+            stop = next((i for i in range(start, len(lines)) if norms[i].startswith("plan estrategico")), len(lines))
+            for line in lines[start:stop]:
+                if len(line) <= 22 and line[:1].isupper() and not line.endswith((".", ",")):
+                    valores.append(line)
 
         return {
-            "mision": mision,
-            "vision": vision,
-            "valores": ", ".join(valores),
-            "principios": "Calidad, Igualdad de oportunidades, Pertinencia cientifica, Autonomia responsable",
+            "mision": clean_text(mision) or None,
+            "vision": clean_text(vision) or None,
+            "valores": ", ".join(valores) or None,
+            "principios": principios,
             "fuente_url": url,
         }
 
     def _extract_historia(self) -> List[Dict[str, Any]]:
-        """Extrae la cronologia e hitos historicos de la universidad.
+        """Extrae la cronologia de hitos de la pagina de historia.
+
+        Estructura real: una linea con el anio, una linea opcional con el dia ("30 de agosto"),
+        un titulo corto y la descripcion. Los registros sin anio legible conservan anio None.
 
         Returns:
-            List[Dict[str, Any]]: Lista de hitos fundacionales y modernos.
+            List[Dict[str, Any]]: Hitos con anio, titulo y descripcion.
         """
         url = settings.endpoints.get("historia", f"{settings.base_url}/historia/")
         html_content = self.http_client.get(url)
+        if not html_content:
+            self.logger.warning(f"No se pudo obtener {url}; se omiten los hitos historicos.")
+            return []
+
+        lines = page_lines(BeautifulSoup(html_content, "html.parser"))
+        norms = [remove_accents(l).lower().strip() for l in lines]
+        start = norms.index("historia") + 1 if "historia" in norms else 0
+        stop = next((i for i in range(start, len(lines)) if norms[i].startswith(("direccion:", "llamanos"))), len(lines))
+
         hitos: List[Dict[str, Any]] = []
+        block: List[str] = []
+        anio = None
 
-        if html_content:
-            soup = BeautifulSoup(html_content, "html.parser")
-            paragraphs = soup.find_all("p")
-            for p in paragraphs:
-                t = clean_text(p.get_text())
-                if len(t) > 40 and not t.startswith("Powered"):
-                    year_match = re.search(r"\b(18\d{2}|19\d{2}|20\d{2})\b", t)
-                    anio = int(year_match.group(0)) if year_match else None
-                    hitos.append({
-                        "tipo_registro": "Hito Historico",
-                        "anio": anio or 1869,
-                        "titulo": t[:60] + "...",
-                        "descripcion": t,
-                        "fuente_url": url,
-                    })
+        def flush() -> None:
+            body = [b for b in block if not re.fullmatch(r"\d{1,2} de [a-zñ]+", remove_accents(b).lower())
+                    and not b.lower().startswith("powered by")]
+            if anio is not None and len(body) >= 2:
+                hitos.append({
+                    "tipo_registro": "Hito Historico",
+                    "anio": anio,
+                    "titulo": body[0],
+                    "descripcion": clean_text(" ".join(body[1:])),
+                    "fuente_url": url,
+                })
 
-        if not hitos:
-            hitos = [
-                {
-                    "tipo_registro": "Hito Historico",
-                    "anio": 1869,
-                    "titulo": "Fundacion de la Escuela Politecnica Nacional",
-                    "descripcion": "Fundada por Decreto de la Convencion Nacional por el presidente Gabriel Garcia Moreno con apoyo de cientificos jesuitas alemanes.",
-                    "fuente_url": url,
-                },
-                {
-                    "tipo_registro": "Hito Historico",
-                    "anio": 1944,
-                    "titulo": "Reapertura de la EPN",
-                    "descripcion": "El presidente Jose Maria Velasco Ibarra decreta la reapertura de la institucion, designando al Ing. Pedro Pinto Guzman como su Rector.",
-                    "fuente_url": url,
-                },
-                {
-                    "tipo_registro": "Hito Historico",
-                    "anio": 1983,
-                    "titulo": "Creacion del Instituto Geofisico",
-                    "descripcion": "Establecimiento del IG-EPN como ente rector del monitoreo sismico y volcanico del Ecuador.",
-                    "fuente_url": url,
-                },
-            ]
-
+        for line in lines[start:stop]:
+            if re.fullmatch(r"(1[89]\d{2}|20\d{2})", line):
+                flush()
+                anio, block = int(line), []
+            else:
+                block.append(line)
+        flush()
         return hitos
 
     def _extract_laboratorios(self) -> List[Dict[str, Any]]:
@@ -143,12 +128,12 @@ class InstitucionalScraper(BaseScraper):
                 if any(k in name.lower() for k in ["instituto", "centro", "laboratorio", "parque"]):
                     # Buscar parrafos subsiguientes para descripcion y ubicacion
                     desc = ""
-                    ubicacion = "Campus Politecnico"
+                    ubicacion = None
                     curr = h.find_next_sibling()
                     while curr and curr.name in ["p", "div"]:
                         text_curr = clean_text(curr.get_text())
                         if "ubicación" in text_curr.lower() or "edificio" in text_curr.lower():
-                            ubicacion = text_curr
+                            ubicacion = re.sub(r"^ubicaci[oó]n\s*:\s*", "", text_curr, flags=re.IGNORECASE)
                         elif len(text_curr) > 30 and not desc:
                             desc = text_curr
                         curr = curr.find_next_sibling()
@@ -158,37 +143,9 @@ class InstitucionalScraper(BaseScraper):
                         "nombre_centro": name,
                         "tipo_estructura": "Instituto" if "instituto" in name.lower() else "Centro de Investigacion",
                         "ubicacion": ubicacion,
-                        "descripcion": desc or f"Unidad cientifica de vanguardia: {name}",
+                        "descripcion": desc or None,
                         "fuente_url": url,
                     })
-
-        if not centros:
-            centros = [
-                {
-                    "tipo_registro": "Estructura de Investigacion",
-                    "nombre_centro": "Instituto Geofisico (IG-EPN)",
-                    "tipo_estructura": "Instituto",
-                    "ubicacion": "Edificio Nro. 11: Ingenieria Civil y Ambiental. 6to Piso",
-                    "descripcion": "Principal centro de investigacion para el diagnostico y vigilancia del peligro sismico y volcanico en Ecuador.",
-                    "fuente_url": url,
-                },
-                {
-                    "tipo_registro": "Estructura de Investigacion",
-                    "nombre_centro": "Centro de Modelizacion Matematica (ModeMat)",
-                    "tipo_estructura": "Centro de Investigacion",
-                    "ubicacion": "Edificio Nro. 12: Facultad de Ciencias",
-                    "descripcion": "Centro de excelencia enfocado en matematica aplicada, optimizacion y modelizacion cuantitativa.",
-                    "fuente_url": url,
-                },
-                {
-                    "tipo_registro": "Estructura de Investigacion",
-                    "nombre_centro": "Centro de Investigacion y Control Ambiental (CICAM)",
-                    "tipo_estructura": "Centro de Investigacion",
-                    "ubicacion": "Campus Politecnico",
-                    "descripcion": "Investigacion y monitoreo de parametros de calidad de agua, aire y suelos.",
-                    "fuente_url": url,
-                },
-            ]
 
         return centros
 
@@ -204,27 +161,29 @@ class InstitucionalScraper(BaseScraper):
 
         records: List[Dict[str, Any]] = []
 
-        # Registro filosofico maestro
-        records.append({
-            "categoria": "Identidad Filosofica",
-            "clave": "Mision",
-            "contenido": nosotros["mision"],
-            "metadato": nosotros["valores"],
-            "url": nosotros["fuente_url"],
-        })
-        records.append({
-            "categoria": "Identidad Filosofica",
-            "clave": "Vision",
-            "contenido": nosotros["vision"],
-            "metadato": nosotros["principios"],
-            "url": nosotros["fuente_url"],
-        })
+        # Identidad filosofica: solo lo que la pagina publica
+        if nosotros["mision"]:
+            records.append({
+                "categoria": "Identidad Filosofica",
+                "clave": "Mision",
+                "contenido": nosotros["mision"],
+                "metadato": nosotros["valores"],
+                "url": nosotros["fuente_url"],
+            })
+        if nosotros["vision"]:
+            records.append({
+                "categoria": "Identidad Filosofica",
+                "clave": "Vision",
+                "contenido": nosotros["vision"],
+                "metadato": nosotros["principios"],
+                "url": nosotros["fuente_url"],
+            })
 
         # Hitos historicos
         for h in historia:
             records.append({
                 "categoria": "Hito Historico",
-                "clave": str(h.get("anio", 1869)),
+                "clave": str(h["anio"]) if h.get("anio") else "Sin anio",
                 "contenido": h.get("descripcion", ""),
                 "metadato": h.get("titulo", ""),
                 "url": h.get("fuente_url", ""),
@@ -236,7 +195,7 @@ class InstitucionalScraper(BaseScraper):
                 "categoria": "Centro de Investigacion",
                 "clave": lab.get("nombre_centro", ""),
                 "contenido": lab.get("descripcion", ""),
-                "metadato": f"Tipo: {lab.get('tipo_estructura')} | Ubicacion: {lab.get('ubicacion')}",
+                "metadato": f"Tipo: {lab.get('tipo_estructura')}" + (f" | Ubicacion: {lab['ubicacion']}" if lab.get("ubicacion") else ""),
                 "url": lab.get("fuente_url", ""),
             })
 

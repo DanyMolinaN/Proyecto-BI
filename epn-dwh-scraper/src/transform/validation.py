@@ -7,7 +7,7 @@ generando reportes formales de perfilamiento de datos.
 """
 
 import re
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 
 from src.utils.logger import setup_logger
@@ -22,7 +22,14 @@ class DataValidator:
         """Inicializa el contenedor de hallazgos y metricas de calidad."""
         self.validation_results: List[Dict[str, Any]] = []
 
-    def profile_dataframe(self, df: pd.DataFrame, table_name: str, key_column: str, required_columns: List[str]) -> Dict[str, Any]:
+    def profile_dataframe(
+        self,
+        df: pd.DataFrame,
+        table_name: str,
+        key_column: str,
+        required_columns: List[str],
+        foreign_keys: Optional[Dict[str, Tuple[pd.DataFrame, str]]] = None,
+    ) -> Dict[str, Any]:
         """Realiza el perfilamiento cuantitativo y validacion estructural de una tabla.
 
         Args:
@@ -30,6 +37,8 @@ class DataValidator:
             table_name (str): Nombre logico de la tabla.
             key_column (str): Nombre de la clave primaria o sustituta.
             required_columns (List[str]): Lista de columnas obligatorias sin nulos ni vacios.
+            foreign_keys (Optional[Dict]): {columna_fk: (dataframe_referenciado, columna_pk)} para verificar
+                integridad referencial; una FK nula o sin padre se reporta como huerfana.
 
         Returns:
             Dict[str, Any]: Metricas de perfilamiento y estado de cumplimiento.
@@ -65,15 +74,32 @@ class DataValidator:
             else:
                 empty_issues.append(f"Columna obligatoria {col} ausente.")
 
+        # 3b. Integridad referencial: FK nula o sin registro padre
+        for fk_col, (ref_df, ref_col) in (foreign_keys or {}).items():
+            if fk_col not in df.columns:
+                continue
+            valid = set(ref_df[ref_col].dropna()) if ref_df is not None and not ref_df.empty else set()
+            orphans = int((~df[fk_col].isin(valid)).sum())
+            if orphans > 0:
+                empty_issues.append(f"{orphans} registros con {fk_col} nula o sin registro en la dimension referenciada.")
+
+        # 3c. Columnas con datos faltantes (informativo: no cambia el estado, pero queda visible)
+        info = []
+        for col, n in null_counts.items():
+            if n > 0 and col not in required_columns:
+                info.append(f"Info: {col} sin dato en {n} de {total_rows} registros ({n / total_rows:.0%}).")
+
         # 4. Deteccion de valores atipicos (outliers) en metricas conocidas
         outliers = []
         if "duracion_periodos" in df.columns:
-            anormales = df[(df["duracion_periodos"] < 2) | (df["duracion_periodos"] > 16)]
+            periodos = pd.to_numeric(df["duracion_periodos"], errors="coerce").astype("float64")
+            anormales = df[(periodos < 2) | (periodos > 16)]
             if len(anormales) > 0:
                 outliers.append(f"{len(anormales)} registros con duracion de periodos fuera de rango academico (2 a 16).")
 
         if "creditos_totales" in df.columns:
-            cred_atipicos = df[(df["creditos_totales"] < 30) | (df["creditos_totales"] > 400)]
+            creditos = pd.to_numeric(df["creditos_totales"], errors="coerce").astype("float64")
+            cred_atipicos = df[(creditos < 30) | (creditos > 400)]
             if len(cred_atipicos) > 0:
                 outliers.append(f"{len(cred_atipicos)} registros con creditos fuera de rango (30 a 400).")
 
@@ -98,7 +124,7 @@ class DataValidator:
             "duplicados_clave": int(duplicates_key),
             "nulos_totales": int(total_nulls),
             "estado_calidad": estado,
-            "observaciones": empty_issues + outliers,
+            "observaciones": empty_issues + outliers + info,
         }
 
         self.validation_results.append(profile)

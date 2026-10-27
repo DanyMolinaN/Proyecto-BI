@@ -12,7 +12,17 @@ network:
   max_retries: 4
   backoff_factor: 1.5
   use_cache: true
-  verify_ssl: false
+  cache_ttl_hours: 24
+  verify_ssl: true
+
+# Minimo de registros esperado por extractor; si se obtienen menos, la ejecucion falla
+# en lugar de cargar un warehouse incompleto.
+min_records:
+  facultades: 5
+  carreras: 20
+  autoridades: 5
+  institucional: 2
+  noticias: 5
 
 endpoints:
   robots_txt: "https://www.epn.edu.ec/robots.txt"

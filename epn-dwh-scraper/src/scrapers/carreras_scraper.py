@@ -13,6 +13,9 @@ from bs4 import BeautifulSoup
 from src.config import settings
 from src.scrapers.base_scraper import BaseScraper
 from src.utils.helpers import (
+    remove_accents,
+    extract_labeled_value,
+    page_lines,
     clean_text,
     extract_degree_level,
     extract_duration_periods,
@@ -66,6 +69,80 @@ class CarrerasScraper(BaseScraper):
         self.logger.info(f"Identificados {len(urls)} programas academicos para analisis detallado.")
         return urls
 
+    TAB_LABELS = {
+        "perfil de ingreso", "objetivos", "perfil de egreso", "perfil profesional", "malla",
+        "requisitos", "horarios", "graduacion", "contacto",
+    }
+    SECTION_STOPS = (
+        "objetivos de la carrera", "resultados generales", "resultados especificos", "requisitos de graduacion",
+        "coordinador", "personal administrativo", "unidad academica", "horario de atencion",
+    )
+    MAX_PROFILE_CHARS = 1000
+
+    @staticmethod
+    def _norm(line: str) -> str:
+        return remove_accents(line).lower().strip().rstrip(":")
+
+    def _content_lines(self, lines: List[str]) -> List[str]:
+        """Devuelve las lineas posteriores al bloque de pestanas (PERFIL DE INGRESO ... CONTACTO)."""
+        for i, line in enumerate(lines):
+            if self._norm(line) == "perfil de ingreso" and i + 1 < len(lines) and self._norm(lines[i + 1]) in self.TAB_LABELS:
+                j = i
+                while j < len(lines) and self._norm(lines[j]) in self.TAB_LABELS:
+                    j += 1
+                return lines[j:]
+        return []
+
+    def _join(self, parts: List[str]) -> Any:
+        text = clean_text(" ".join(p.lstrip("* ").strip() for p in parts))
+        return text[: self.MAX_PROFILE_CHARS] or None
+
+    def _extract_profiles(self, lines: List[str]) -> Tuple[Any, Any, Any]:
+        """Extrae perfil de ingreso, perfil de egreso y campo ocupacional desde el contenido de la ficha.
+
+        - Ingreso: parrafos que siguen a las pestanas, hasta el primer encabezado o vineta
+          (en posgrados puede quedar incompleto si el texto continua en vinetas).
+        - Egreso: solo "Resultados Generales" (grado); en posgrados no hay encabezado fiable y queda None.
+        - Campo ocupacional: solo si existe un encabezado explicito; no se deduce.
+        Lo que no se puede ubicar con certeza queda como None.
+        """
+        content = self._content_lines(lines)
+        if not content:
+            return None, None, None
+
+        ingreso: List[str] = []
+        k = 0
+        while k < len(content):
+            n = self._norm(content[k])
+            if content[k].startswith("*") or any(n.startswith(st) for st in self.SECTION_STOPS):
+                break
+            ingreso.append(content[k])
+            k += 1
+
+        egreso: List[str] = []
+        norms = [self._norm(c) for c in content]
+        if "resultados generales" in norms:
+            start = norms.index("resultados generales") + 1
+            for line, n in zip(content[start:], norms[start:]):
+                if n.startswith("resultados especificos") or n.startswith("requisitos de graduacion"):
+                    break
+                if re.fullmatch(r"rg\d+\.?", n):
+                    continue
+                egreso.append(line)
+        # Posgrados: las vinetas tras el ingreso mezclan requisitos, objetivos y resultados sin
+        # encabezado, por lo que no se puede afirmar cual es el perfil de egreso: queda None.
+
+        campo: List[str] = []
+        for i, n in enumerate(norms):
+            if n in ("campo ocupacional", "campo laboral", "ambito laboral", "ocupacion profesional"):
+                for line, nn in zip(content[i + 1:], norms[i + 1:]):
+                    if any(nn.startswith(st) for st in self.SECTION_STOPS):
+                        break
+                    campo.append(line)
+                break
+
+        return self._join(ingreso), self._join(egreso), self._join(campo)
+
     def _parse_program_page(self, url: str, suggested_level: str) -> Dict[str, Any]:
         """Parsea los datos de la ficha tecnica de un programa academico.
 
@@ -78,27 +155,12 @@ class CarrerasScraper(BaseScraper):
         """
         html_content = self.http_client.get(url)
         if not html_content:
-            # Fallback a partir de slug si no responde la pagina
-            slug_name = url.strip("/").split("/")[-1].replace("-", " ").title()
-            return {
-                "nombre": slug_name,
-                "facultad_nombre": "Escuela Politecnica Nacional",
-                "nivel": suggested_level,
-                "modalidad": "Presencial",
-                "duracion_periodos": 9 if suggested_level == "Grado" else 4,
-                "duracion_anios": 4.5 if suggested_level == "Grado" else 2.0,
-                "creditos": 120 if suggested_level == "Grado" else 60,
-                "titulo_otorga": slug_name,
-                "codigo_resolucion": "S/N",
-                "perfil_ingreso": "Bachiller o profesional afin segun normativa LOES.",
-                "perfil_egreso": "Profesional integral de alta calidad cientifica y etica.",
-                "campo_ocupacional": "Sector publico y privado en su area de especialidad.",
-                "url": url,
-                "malla_url": url,
-            }
+            self.logger.warning(f"Programa omitido: no se pudo obtener {url}")
+            return {}
 
         soup = BeautifulSoup(html_content, "html.parser")
-        text_all = soup.get_text()
+        # Las fichas de grado publican "etiqueta / valor" en lineas consecutivas (sin dos puntos)
+        lines = page_lines(BeautifulSoup(html_content, "html.parser"))
 
         # Nombre de la carrera
         nombre = ""
@@ -113,6 +175,7 @@ class CarrerasScraper(BaseScraper):
 
         # Facultad de pertenencia
         facultad_nombre = ""
+        campos_inferidos: List[str] = []
         known_faculties_map = {
             "sistemas": "Facultad de Ingenieria de Sistemas",
             "ciencias administrativas": "Facultad de Ciencias Administrativas",
@@ -127,19 +190,12 @@ class CarrerasScraper(BaseScraper):
             "tecnologos": "Escuela de Formacion de Tecnologos",
         }
 
-        # 1. Buscar coincidencia exacta en parrafos individuales del cuerpo
-        for p in soup.find_all(["p", "h3", "h4"]):
-            p_text = clean_text(p.get_text()).lower()
-            if "facultad" in p_text or "escuela de formacion" in p_text:
-                for key_term, full_fac in known_faculties_map.items():
-                    if key_term in p_text and len(p_text) < 70:
-                        facultad_nombre = full_fac
-                        break
-            if facultad_nombre:
-                break
+        # 1. Dato publicado por el portal en la ficha ("Unidad Academica")
+        facultad_nombre = extract_labeled_value(lines, "Unidad Academica")
 
-        # 2. Regla de inferencia tematica por nombre de carrera si no se detecto
+        # 2. Si la ficha no lo publica (p. ej. maestrias), inferencia por nombre; se marca en campos_inferidos
         if not facultad_nombre:
+            campos_inferidos.append("facultad")
             nombre_low = nombre.lower()
             if any(k in nombre_low for k in ["software", "computacion", "computación", "sistemas de informacion"]):
                 facultad_nombre = "Facultad de Ingenieria de Sistemas"
@@ -160,75 +216,23 @@ class CarrerasScraper(BaseScraper):
             elif "tecnologia" in nombre_low:
                 facultad_nombre = "Escuela de Formacion de Tecnologos"
             else:
-                facultad_nombre = "Facultad de Ingenieria Civil y Ambiental"
+                facultad_nombre = None  # No determinable: queda sin asignar en lugar de adivinar
 
         # Nivel de formacion
         nivel = extract_degree_level(nombre, suggested_level)
 
-        # Modalidad
-        modalidad_match = re.search(r"Modalidad\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
-        modalidad_raw = modalidad_match.group(1) if modalidad_match else text_all
-        modalidad = extract_modality(modalidad_raw)
+        # Modalidad, duracion, titulo y resolucion: solo si la ficha los publica
+        modalidad = extract_modality(extract_labeled_value(lines, "Modalidad"))
 
-        # Duracion
-        duracion_match = re.search(r"Duraci[oó]n\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
-        duracion_raw = duracion_match.group(1) if duracion_match else ""
-        periodos = extract_duration_periods(duracion_raw)
-        if periodos is None:
-            # Duracion tipica segun nivel LOES en Ecuador
-            if nivel == "Tecnologia":
-                periodos = 5
-            elif nivel == "Grado":
-                periodos = 9
-            elif nivel == "Maestria":
-                periodos = 3
-            elif nivel == "Doctorado":
-                periodos = 8
-            else:
-                periodos = 8
+        periodos = extract_duration_periods(extract_labeled_value(lines, "Duracion"))
+        # Un periodo academico es un semestre; los anios se derivan de los periodos
+        anios = round(periodos / 2.0, 1) if periodos is not None else None
 
-        anios = round(periodos / 2.0, 1)
+        titulo_otorga = clean_text(extract_labeled_value(lines, "Titulo que otorga")) or None
+        codigo_resolucion = extract_labeled_value(lines, "Resolucion de aprobacion CES")
 
-        # Titulo que otorga
-        titulo_match = re.search(r"T[íi]tulo\s+que\s+otorga\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
-        if titulo_match:
-            titulo_otorga = clean_text(titulo_match.group(1))
-        else:
-            titulo_otorga = nombre
-
-        # Codigo o resolucion CES
-        res_match = re.search(r"(RPC-[A-Z0-9-._]+|\d{4}-[A-Z0-9-]+)", text_all)
-        codigo_resolucion = res_match.group(0) if res_match else "Aprobacion CES Vigente"
-
-        # Perfil de ingreso
-        perfil_ingreso = ""
-        for tag in soup.find_all(["p", "div", "li"]):
-            t = clean_text(tag.get_text())
-            if "perfil de ingreso" in t.lower() and len(t) > 30:
-                perfil_ingreso = t
-                break
-        if not perfil_ingreso:
-            perfil_ingreso = "Aspirantes con bases matematicas, logicas y cientificas acordes al perfil de ingreso de la EPN."
-
-        # Perfil de egreso
-        perfil_egreso = ""
-        for tag in soup.find_all(["p", "div", "li"]):
-            t = clean_text(tag.get_text())
-            if any(k in t.lower() for k in ["perfil de egreso", "resultados generales", "objetivos de la carrera"]) and len(t) > 30:
-                perfil_egreso = t
-                break
-        if not perfil_egreso:
-            perfil_egreso = "Profesionales competentes, con pensamiento critico, liderazgo y responsabilidad social y ambiental."
-
-        # Campo ocupacional
-        campo_ocupacional = ""
-        for tag in soup.find_all(["p", "div", "li"]):
-            t = clean_text(tag.get_text())
-            if any(k in t.lower() for k in ["campo ocupacional", "desempeñarse", "ambito laboral", "requisitos de gradu"]) and len(t) > 30:
-                campo_ocupacional = t
-                break
-        if not campo_ocupacional:
-            campo_ocupacional = "Empresas publicas y privadas, centros de investigacion y emprendimiento tecnologico."
+        # Perfiles y campo ocupacional: se leen de la zona de contenido, nunca del menu ni de contenedores grandes
+        perfil_ingreso, perfil_egreso, campo_ocupacional = self._extract_profiles(lines)
 
         # Malla curricular URL (busqueda de PDF)
         malla_url = url
@@ -238,10 +242,6 @@ class CarrerasScraper(BaseScraper):
                 malla_url = href if href.startswith("http") else f"{settings.base_url}{href}"
                 break
 
-        # Creditos estimados segun nivel
-        creditos_map = {"Tecnologia": 90, "Grado": 120, "Maestria": 60, "Doctorado": 240}
-        creditos = creditos_map.get(nivel, 120)
-
         return {
             "nombre": nombre,
             "facultad_nombre": facultad_nombre,
@@ -249,14 +249,15 @@ class CarrerasScraper(BaseScraper):
             "modalidad": modalidad,
             "duracion_periodos": periodos,
             "duracion_anios": anios,
-            "creditos": creditos,
+            "creditos": None,  # no se publica en la ficha; antes se estimaba por nivel
             "titulo_otorga": titulo_otorga,
             "codigo_resolucion": codigo_resolucion,
-            "perfil_ingreso": perfil_ingreso[:500],
-            "perfil_egreso": perfil_egreso[:500],
-            "campo_ocupacional": campo_ocupacional[:500],
+            "perfil_ingreso": perfil_ingreso,
+            "perfil_egreso": perfil_egreso,
+            "campo_ocupacional": campo_ocupacional,
             "malla_curricular_url": malla_url,
             "url": url,
+            "campos_inferidos": ",".join(campos_inferidos) or None,
         }
 
     def extract(self) -> List[Dict[str, Any]]:
@@ -271,29 +272,7 @@ class CarrerasScraper(BaseScraper):
         for url, suggested_level in urls_with_level:
             self.logger.info(f"Parseando programa: {url}")
             data = self._parse_program_page(url, suggested_level)
-            programs.append(data)
-
-        # Asegurar cobertura minima si la conexion o selectores sufren alteraciones
-        if len(programs) < 5:
-            self.logger.warning("Pocos programas recuperados dinamicamente; aplicando catalogo canonico institucional.")
-            canonicos = [
-                ("https://www.epn.edu.ec/ingenieria-en-software/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-en-ciencias-de-la-computacion/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-en-sistemas-de-informacion/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-civil/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-en-electricidad/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-en-electronica-y-automatizacion/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-en-mecanica/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-quimica/", "Grado"),
-                ("https://www.epn.edu.ec/ingenieria-ambiental/", "Grado"),
-                ("https://www.epn.edu.ec/licenciatura-administracion-de-empresas/", "Grado"),
-                ("https://www.epn.edu.ec/maestria-en-software/", "Maestria"),
-                ("https://www.epn.edu.ec/maestria-en-ciberseguridad/", "Maestria"),
-                ("https://www.epn.edu.ec/maestria-en-inteligencia-artificial/", "Maestria"),
-                ("https://www.epn.edu.ec/doctorados/", "Doctorado"),
-            ]
-            for u, lev in canonicos:
-                if not any(p["url"] == u for p in programs):
-                    programs.append(self._parse_program_page(u, lev))
+            if data:
+                programs.append(data)
 
         return programs

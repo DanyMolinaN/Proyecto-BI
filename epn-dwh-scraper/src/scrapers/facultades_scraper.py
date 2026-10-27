@@ -94,7 +94,8 @@ class FacultadesScraper(BaseScraper):
         """
         html_content = self.http_client.get(url)
         if not html_content:
-            return {"url": url, "nombre": url.split("/")[-2].replace("-", " ").title()}
+            self.logger.warning(f"Facultad omitida: no se pudo obtener {url}")
+            return {}
 
         soup = BeautifulSoup(html_content, "html.parser")
 
@@ -122,18 +123,23 @@ class FacultadesScraper(BaseScraper):
         # Autoridades: Decano y Subdecano
         decano = None
         subdecano = None
-        text_all = soup.get_text()
+        # Separador de linea: evita que textos de elementos vecinos queden pegados ("...ToapaxiSubdecano:")
+        text_all = soup.get_text(separator="\n")
 
         # Busqueda de decano y subdecano mediante expresiones regulares en texto
         decano_match = re.search(r"Decan[oa]\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
         if decano_match:
             raw_d = decano_match.group(1).split(",")[0]
             decano = clean_text(raw_d).strip(".")
+            if "@" in decano:
+                decano = None
 
         subdecano_match = re.search(r"Subdecan[oa]\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
         if subdecano_match:
             raw_s = subdecano_match.group(1).split(",")[0]
             subdecano = clean_text(raw_s).strip(".")
+            if "@" in subdecano:
+                subdecano = None
 
         # Mision y Vision
         mision = ""
@@ -164,23 +170,23 @@ class FacultadesScraper(BaseScraper):
 
         # Contacto
         contacto_email = extract_email(text_all)
-        contacto_telefono = extract_phone(text_all) or "(+593) 2 2976 300"
+        contacto_telefono = extract_phone(text_all)
         
         # Ubicacion en campus
         ubicacion_match = re.search(r"Ubicaci[oó]n\s*:\s*([^\n\r<]+)", text_all, re.IGNORECASE)
-        ubicacion = clean_text(ubicacion_match.group(1)) if ubicacion_match else "Campus Politecnico J. Ruben Orellana, Quito"
+        ubicacion = clean_text(ubicacion_match.group(1)) if ubicacion_match else None
 
         return {
             "nombre": name,
             "sigla": sigla,
-            "decano": decano or "No especificado",
-            "subdecano": subdecano or "No especificado",
+            "decano": decano,
+            "subdecano": subdecano,
             "descripcion": descripcion,
-            "mision": mision or descripcion,
-            "vision": vision or "Ser referente nacional e internacional en ciencia y tecnologia.",
+            "mision": mision or None,
+            "vision": vision or None,
             "url": url,
-            "departamentos_adscritos": "; ".join(departamentos) if departamentos else "Departamento General",
-            "contacto_correo": contacto_email or f"{sigla.lower()}@epn.edu.ec",
+            "departamentos_adscritos": "; ".join(departamentos) if departamentos else None,
+            "contacto_correo": contacto_email,
             "contacto_telefono": contacto_telefono,
             "ubicacion_campus": ubicacion,
         }
@@ -196,23 +202,7 @@ class FacultadesScraper(BaseScraper):
         for url in urls:
             self.logger.info(f"Extrayendo informacion de facultad: {url}")
             data = self._parse_faculty_page(url)
-            facultades.append(data)
-
-        # Fallback defensivo si el HTML del directorio no retorno URLs por cambio en sitio
-        if not facultades:
-            self.logger.warning("No se descubrieron URLs dinamicas. Usando lista canónica conocida.")
-            canonicas = [
-                "https://www.epn.edu.ec/facultad-ciencias/",
-                "https://www.epn.edu.ec/facultad-ciencias-administrativas/",
-                "https://www.epn.edu.ec/facultad-geologia-petroleos/",
-                "https://www.epn.edu.ec/facultad-ingenieria-civil-ambiental/",
-                "https://www.epn.edu.ec/facultad-ingenieria-de-sistemas/",
-                "https://www.epn.edu.ec/facultad-ingenieria-electrica-electronica/",
-                "https://www.epn.edu.ec/facultad-ingenieria-mecanica/",
-                "https://www.epn.edu.ec/facultad-de-quimica-y-agroindustria/",
-                "https://www.epn.edu.ec/esfot/",
-            ]
-            for u in canonicas:
-                facultades.append(self._parse_faculty_page(u))
+            if data:
+                facultades.append(data)
 
         return facultades
