@@ -6,15 +6,62 @@ eliminacion de duplicados, correccion de codificaciones, construccion de claves
 sustitutas y generacion de DataFrames estructurados segun el esquema dimensional estrella.
 """
 
+import difflib
 import re
 from datetime import datetime
 from typing import Any, Dict, List, Tuple
 import pandas as pd
 
-from src.utils.helpers import clean_text, generate_surrogate_key
+from src.utils.helpers import clean_text, generate_surrogate_key, remove_accents
 from src.utils.logger import setup_logger
 
 logger = setup_logger("cleaning")
+
+
+def _text_or_none(value: Any) -> Any:
+    """Normaliza texto y devuelve None cuando no hay dato (nunca se inventa un valor)."""
+    return clean_text(value) or None
+
+
+def _clean_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+    """Aplica limpieza textual; las columnas ausentes o vacias quedan como NULL."""
+    for col in columns:
+        if col in df.columns:
+            df[col] = df[col].apply(_text_or_none)
+        else:
+            df[col] = None
+    return df
+
+
+def _to_int64(values: Any) -> pd.Series:
+    """Convierte a Int64 nullable sin pasar por float64 (las claves hash de 56 bits perderian precision)."""
+    return pd.Series(pd.array([None if (v is None or pd.isna(v)) else int(v) for v in values], dtype="Int64"))
+
+
+def _match_facultad_key(raw_name: Any, df_facultades: pd.DataFrame) -> Any:
+    """Resuelve la clave de facultad por nombre o sigla; devuelve None si no hay coincidencia.
+
+    La comparacion ignora tildes y mayusculas, y admite variaciones menores de redaccion
+    (ej: "Facultad de Geologia y Petroleos" vs "Facultad de Ingenieria Geologia y Petroleos").
+    """
+    raw_norm = remove_accents(clean_text(raw_name)).lower()
+    if not raw_norm or df_facultades.empty:
+        return None
+    names = {
+        fac_row["facultad_key"]: remove_accents(clean_text(fac_row["nombre"])).lower()
+        for _, fac_row in df_facultades.iterrows()
+    }
+    for key, fac_norm in sorted(names.items(), key=lambda kv: len(kv[1]), reverse=True):
+        if fac_norm and (fac_norm in raw_norm or raw_norm in fac_norm):
+            return key
+    for _, fac_row in df_facultades.iterrows():
+        sigla = clean_text(fac_row["sigla"]).lower()
+        if sigla and re.search(r"\b" + re.escape(sigla) + r"\b", raw_norm):
+            return fac_row["facultad_key"]
+    close = difflib.get_close_matches(raw_norm, list(names.values()), n=1, cutoff=0.8)
+    if close:
+        return next(k for k, v in names.items() if v == close[0])
+    return None
 
 
 class DataCleaner:
@@ -24,7 +71,7 @@ class DataCleaner:
         """Inicializa estructuras y catalogos maestros de referencia."""
         self.reference_date = datetime.now()
 
-    def build_dim_tiempo(self, start_year: int = 2023, end_year: int = 2027) -> pd.DataFrame:
+    def build_dim_tiempo(self, start_year: int = 2015, end_year: int = 2035) -> pd.DataFrame:
         """Genera la dimension tiempo con granularidad diaria y atributos de calendario academico.
 
         Args:
@@ -75,17 +122,8 @@ class DataCleaner:
 
         df = pd.DataFrame(raw_facultades)
 
-        # Normalizacion de cadenas
-        for col in ["nombre", "sigla", "decano", "subdecano", "descripcion", "mision", "vision", "url", "contacto_correo", "contacto_telefono", "ubicacion_campus"]:
-            if col in df.columns:
-                df[col] = df[col].apply(clean_text)
-            else:
-                df[col] = "No especificado"
-
-        # Imputacion de nulos
-        df["decano"] = df["decano"].replace("", "No especificado")
-        df["subdecano"] = df["subdecano"].replace("", "No especificado")
-        df["contacto_correo"] = df["contacto_correo"].replace("", "contacto@epn.edu.ec")
+        # Normalizacion de cadenas; lo ausente queda NULL
+        df = _clean_columns(df, ["nombre", "sigla", "decano", "subdecano", "descripcion", "mision", "vision", "url", "departamentos_adscritos", "contacto_correo", "contacto_telefono", "ubicacion_campus"])
 
         # Eliminacion de duplicados por nombre normalizado
         df["nombre_norm"] = df["nombre"].str.lower()
@@ -121,23 +159,21 @@ class DataCleaner:
 
         df = pd.DataFrame(raw_carreras)
 
-        # Normalizacion de textos
-        text_cols = ["nombre", "facultad_nombre", "nivel", "modalidad", "titulo_otorga", "codigo_resolucion", "perfil_ingreso", "perfil_egreso", "campo_ocupacional", "url"]
-        for c in text_cols:
-            if c in df.columns:
-                df[c] = df[c].apply(clean_text)
-            else:
-                df[c] = "No especificado"
+        # Normalizacion de textos; lo ausente queda NULL
+        df = _clean_columns(df, ["nombre", "facultad_nombre", "nivel", "modalidad", "titulo_otorga", "codigo_resolucion", "perfil_ingreso", "perfil_egreso", "campo_ocupacional", "url", "malla_curricular_url", "campos_inferidos"])
+        # Nivel y modalidad son claves de dimension: se usa un miembro explicito "No especificado"
+        df["nivel"] = df["nivel"].fillna("No especificado")
+        df["modalidad"] = df["modalidad"].fillna("No especificado")
 
         # Eliminacion de duplicados por nombre de carrera
         df["nombre_norm"] = df["nombre"].str.lower()
         df.drop_duplicates(subset=["nombre_norm"], inplace=True)
         df.drop(columns=["nombre_norm"], inplace=True)
 
-        # Validacion de periodos y creditos
-        df["duracion_periodos"] = pd.to_numeric(df["duracion_periodos"], errors="coerce").fillna(9).astype(int)
-        df["duracion_anios"] = pd.to_numeric(df["duracion_anios"], errors="coerce").fillna(4.5).astype(float)
-        df["creditos"] = pd.to_numeric(df["creditos"], errors="coerce").fillna(120).astype(int)
+        # Metricas: se convierten a numerico y lo faltante queda NULL (sin valores por defecto)
+        df["duracion_periodos"] = pd.to_numeric(df["duracion_periodos"] if "duracion_periodos" in df.columns else pd.Series([None] * len(df)), errors="coerce").astype("Int64")
+        df["duracion_anios"] = pd.to_numeric(df["duracion_anios"] if "duracion_anios" in df.columns else pd.Series([None] * len(df)), errors="coerce").astype("float64")
+        df["creditos"] = pd.to_numeric(df["creditos"] if "creditos" in df.columns else pd.Series([None] * len(df)), errors="coerce").astype("Int64")
 
         # 1. Dimension Nivel de Formacion
         niveles_unicos = df["nivel"].unique()
@@ -167,29 +203,11 @@ class DataCleaner:
         df_dim_carrera = df[[
             "carrera_key", "nombre", "titulo_otorga", "codigo_resolucion",
             "perfil_ingreso", "perfil_egreso", "campo_ocupacional",
-            "malla_curricular_url", "url"
+            "malla_curricular_url", "url", "campos_inferidos"
         ]].copy().rename(columns={"nombre": "nombre_carrera", "url": "url_carrera"})
 
-        # Mapeo de FKs hacia facultades de forma precisa
-        def map_facultad_key(raw_fac_name: str) -> int:
-            if not df_facultades.empty:
-                raw_norm = clean_text(raw_fac_name).lower()
-                # 1. Coincidencia por nombre completo o palabras clave principales
-                for _, fac_row in sorted(df_facultades.iterrows(), key=lambda r: len(r[1]["nombre"]), reverse=True):
-                    fac_norm = clean_text(fac_row["nombre"]).lower()
-                    if fac_norm in raw_norm or raw_norm in fac_norm:
-                        return fac_row["facultad_key"]
-
-                # 2. Coincidencia por sigla exacta con límites de palabra
-                for _, fac_row in df_facultades.iterrows():
-                    sigla = fac_row["sigla"].lower()
-                    if re.search(r"\b" + re.escape(sigla) + r"\b", raw_norm):
-                        return fac_row["facultad_key"]
-
-                return df_facultades.iloc[0]["facultad_key"]
-            return generate_surrogate_key("facultad", "EPN")
-
-        df["facultad_key"] = df["facultad_nombre"].apply(map_facultad_key)
+        # Mapeo de FKs hacia facultades; sin coincidencia queda NULL (se reporta en validacion)
+        df["facultad_key"] = _to_int64([_match_facultad_key(n, df_facultades) for n in df["facultad_nombre"]]).values
         df["nivel_key"] = df["nivel"].apply(lambda n: generate_surrogate_key("nivel", n))
         df["modalidad_key"] = df["modalidad"].apply(lambda m: generate_surrogate_key("modalidad", m))
 
@@ -197,7 +215,8 @@ class DataCleaner:
         current_time_key = int(datetime.now().strftime("%Y%m%d"))
         df["oferta_key"] = df.apply(lambda r: generate_surrogate_key("oferta", r["carrera_key"], r["facultad_key"]), axis=1)
         df["tiempo_extraccion_key"] = current_time_key
-        df["es_acreditada"] = 1
+        # La acreditacion no se extrae del portal: se deja NULL hasta contar con una fuente
+        df["es_acreditada"] = pd.Series([pd.NA] * len(df), dtype="Int64")
 
         df_fact_oferta = df[[
             "oferta_key", "carrera_key", "facultad_key", "nivel_key",
@@ -224,12 +243,8 @@ class DataCleaner:
 
         df = pd.DataFrame(raw_autoridades)
 
-        # Limpieza textual
-        for col in ["nombre_completo", "titulo_academico", "cargo", "tipo_cargo", "unidad_adscripcion", "periodo_gestion", "correo_contacto", "biografia", "fuente_url"]:
-            if col in df.columns:
-                df[col] = df[col].apply(clean_text)
-            else:
-                df[col] = "No especificado"
+        df = _clean_columns(df, ["nombre_completo", "titulo_academico", "cargo", "tipo_cargo", "unidad_adscripcion", "periodo_gestion", "correo_contacto", "biografia", "fuente_url"])
+        df = df[df["nombre_completo"].notna() & df["cargo"].notna()]
 
         # Eliminacion de duplicados
         df["nombre_norm"] = df["nombre_completo"].str.lower()
@@ -250,8 +265,10 @@ class DataCleaner:
 
         # 2. Dimension Autoridad (con atributos SCD Tipo 2 para auditoria historica)
         df["autoridad_key"] = df["nombre_completo"].apply(lambda n: generate_surrogate_key("autoridad", n))
+        # El portal no publica la fecha de posesion: la vigencia inicia en la primera captura.
+        # El historial real se construye en transform/scd2.py comparando contra lo ya cargado.
         df["es_vigente"] = 1
-        df["fecha_inicio_vigencia"] = "2023-11-01"
+        df["fecha_inicio_vigencia"] = self.reference_date.strftime("%Y-%m-%d")
         df["fecha_fin_vigencia"] = "9999-12-31"
 
         df_dim_autoridad = df[[
@@ -260,28 +277,13 @@ class DataCleaner:
             "fecha_inicio_vigencia", "fecha_fin_vigencia"
         ]].copy()
 
-        # 3. Mapeo a facultades para la tabla de hechos
-        def map_facultad_key(raw_unidad: str) -> int:
-            if not df_facultades.empty:
-                raw_norm = clean_text(raw_unidad).lower()
-                for _, fac_row in sorted(df_facultades.iterrows(), key=lambda r: len(r[1]["nombre"]), reverse=True):
-                    fac_norm = clean_text(fac_row["nombre"]).lower()
-                    if fac_norm in raw_norm or raw_norm in fac_norm:
-                        return fac_row["facultad_key"]
-
-                for _, fac_row in df_facultades.iterrows():
-                    sigla = fac_row["sigla"].lower()
-                    if re.search(r"\b" + re.escape(sigla) + r"\b", raw_norm):
-                        return fac_row["facultad_key"]
-
-                return df_facultades.iloc[0]["facultad_key"]
-            return generate_surrogate_key("facultad", "EPN")
-
-        df["facultad_key"] = df["unidad_adscripcion"].apply(map_facultad_key)
+        # 3. Mapeo a facultades: las autoridades centrales (Rectorado) no pertenecen a una facultad
+        df["facultad_key"] = _to_int64([_match_facultad_key(u, df_facultades) for u in df["unidad_adscripcion"]]).values
         df["cargo_key"] = df["cargo"].apply(lambda c: generate_surrogate_key("cargo", c))
         df["designacion_key"] = df.apply(lambda r: generate_surrogate_key("designacion", r["autoridad_key"], r["cargo_key"]), axis=1)
-        df["tiempo_designacion_key"] = 20231101
-        df["es_titular"] = pd.to_numeric(df["es_titular"], errors="coerce").fillna(1).astype(int)
+        # Fecha de captura: el portal no indica la fecha de designacion
+        df["tiempo_designacion_key"] = int(self.reference_date.strftime("%Y%m%d"))
+        df["es_titular"] = pd.to_numeric(df["es_titular"], errors="coerce").astype("Int64")
 
         df_fact_autoridades = df[[
             "designacion_key", "autoridad_key", "cargo_key", "facultad_key",
@@ -305,11 +307,10 @@ class DataCleaner:
 
         df = pd.DataFrame(raw_noticias)
 
-        for col in ["post_id", "fecha_publicacion", "titulo", "categoria", "resumen", "url"]:
-            if col in df.columns:
-                df[col] = df[col].apply(clean_text)
-            else:
-                df[col] = ""
+        df = _clean_columns(df, ["post_id", "fecha_publicacion", "titulo", "categoria", "resumen", "url"])
+        df = df[df["url"].notna()]
+        df["categoria"] = df["categoria"].fillna("Sin categoria")
+        df["resumen"] = df["resumen"].fillna("")
 
         # Evitar duplicados por post_id o url
         df.drop_duplicates(subset=["url"], inplace=True)
@@ -325,14 +326,14 @@ class DataCleaner:
         df_dim_categoria = pd.DataFrame(cat_data)
 
         # 2. Fact Comunicacion Institucional
-        def parse_date_key(d_str: str) -> int:
+        def parse_date_key(d_str: Any) -> Any:
             try:
-                dt = datetime.strptime(d_str[:10], "%Y-%m-%d")
+                dt = datetime.strptime(str(d_str)[:10], "%Y-%m-%d")
                 return int(dt.strftime("%Y%m%d"))
             except Exception:
-                return int(datetime.now().strftime("%Y%m%d"))
+                return None  # fecha ilegible: NULL en lugar de usar la fecha de hoy
 
-        df["tiempo_publicacion_key"] = df["fecha_publicacion"].apply(parse_date_key)
+        df["tiempo_publicacion_key"] = _to_int64([parse_date_key(d) for d in df["fecha_publicacion"]]).values
         df["categoria_key"] = df["categoria"].apply(lambda c: generate_surrogate_key("categoria_noticia", c))
         df["noticia_key"] = df["url"].apply(lambda u: generate_surrogate_key("noticia", u))
         df["longitud_caracteres"] = df["resumen"].str.len()

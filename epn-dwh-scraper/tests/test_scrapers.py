@@ -59,7 +59,8 @@ class TestScrapers:
         assert rec["cargo"] == "Rector"
         assert rec["tipo_cargo"] == "Alta Direccion"
         assert rec["es_titular"] == 1
-        assert rec["correo_contacto"] == "rectorado@epn.edu.ec"
+        # El correo no se infiere: sin dato en la fuente queda NULL
+        assert rec["correo_contacto"] is None
 
     def test_institucional_scraper_extract(self, mock_http_client):
         mock_http_client.get.return_value = """

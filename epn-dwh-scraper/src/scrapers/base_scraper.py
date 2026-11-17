@@ -16,6 +16,10 @@ from src.utils.http_client import HttpClient
 from src.utils.logger import setup_logger
 
 
+class ExtractionError(RuntimeError):
+    """Se lanza cuando un extractor obtiene menos registros de los esperados."""
+
+
 class BaseScraper(ABC):
     """Contrato base y operaciones comunes para todos los scrapers del proyecto."""
 
@@ -74,6 +78,13 @@ class BaseScraper(ABC):
         self.logger.info(f"Iniciando ejecucion de extractor: {self.__class__.__name__}")
         try:
             records = self.extract()
+            key = self.__class__.__name__.lower().replace("scraper", "")
+            minimum = settings.min_records.get(key, 1)
+            if len(records) < minimum:
+                raise ExtractionError(
+                    f"{self.__class__.__name__} extrajo {len(records)} registros (minimo esperado: {minimum}). "
+                    "Posible cambio en el sitio, bloqueo o falla de red; no se persistieron datos."
+                )
             self.logger.info(f"Extraccion completada con {len(records)} registros.")
             self.save_interim(records, self.__class__.__name__.lower())
             return records

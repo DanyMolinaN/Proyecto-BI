@@ -51,7 +51,10 @@ class Settings:
         self.use_cache: bool = (env_cache.lower() == "true") if env_cache is not None else bool(net_cfg.get("use_cache", True))
         
         env_ssl = os.getenv("SCRAPER_VERIFY_SSL")
-        self.verify_ssl: bool = (env_ssl.lower() == "true") if env_ssl is not None else bool(net_cfg.get("verify_ssl", False))
+        self.verify_ssl: bool = (env_ssl.lower() == "true") if env_ssl is not None else bool(net_cfg.get("verify_ssl", True))
+
+        self.cache_ttl_hours: float = float(os.getenv("SCRAPER_CACHE_TTL_HOURS", net_cfg.get("cache_ttl_hours", 24)))
+        self.min_records: Dict[str, int] = {k: int(v) for k, v in self._raw_config.get("min_records", {}).items()}
 
         # Endpoints
         self.endpoints: Dict[str, str] = self._raw_config.get("endpoints", {})

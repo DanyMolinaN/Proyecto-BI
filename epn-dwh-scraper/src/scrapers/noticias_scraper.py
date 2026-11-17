@@ -121,33 +121,4 @@ class NoticiasScraper(BaseScraper):
         if not news:
             news = self._extract_via_html()
 
-        # Asegurar registros minimos para pruebas analiticas
-        if not news:
-            news = [
-                {
-                    "post_id": "90191",
-                    "fecha_publicacion": "2026-10-23",
-                    "titulo": "Convocatoria para seleccion de docentes e investigadores",
-                    "categoria": "Convocatoria y Empleo",
-                    "resumen": "Proceso de seleccion para profesionales en el area de ciencias e ingenieria.",
-                    "url": f"{settings.base_url}/noticias/",
-                },
-                {
-                    "post_id": "90127",
-                    "fecha_publicacion": "2026-10-22",
-                    "titulo": "Resolucion del Consejo Politecnico sobre acreditacion",
-                    "categoria": "Resoluciones y Gobierno",
-                    "resumen": "Aprobacion de nuevos lineamientos para acreditacion de programas de posgrado.",
-                    "url": f"{settings.base_url}/noticias/",
-                },
-                {
-                    "post_id": "84739",
-                    "fecha_publicacion": "2026-10-20",
-                    "titulo": "EPN lidera proyectos de investigacion en energias renovables",
-                    "categoria": "Investigacion y Ciencia",
-                    "resumen": "Investigadores politécnicos desarrollan prototipos de generacion limpia.",
-                    "url": f"{settings.base_url}/noticias/",
-                },
-            ]
-
         return news

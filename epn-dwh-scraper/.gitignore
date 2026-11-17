@@ -37,3 +37,15 @@ htmlcov/
 # IDEs
 .vscode/
 .idea/
+
+# macOS
+.DS_Store
+
+# Secretos y credenciales (solo se versiona .env.example)
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+secrets/
+credentials*.json
