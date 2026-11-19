@@ -107,6 +107,19 @@ class TestDataCleaner:
         assert "facultad_key" in df_fac.columns
         assert df_fac.iloc[0]["sigla"] == "FIS"
 
+    def test_clean_facultades_maneja_valores_no_textuales_en_columnas_de_texto(self, cleaner):
+        raw_facultades = [{
+            "nombre": "Facultad de Prueba",
+            "sigla": "FP",
+            "contacto_correo": float("nan"),
+            "contacto_telefono": 123.0,
+        }]
+
+        df_fac = cleaner.clean_facultades(raw_facultades)
+
+        assert pd.isna(df_fac.iloc[0]["contacto_correo"])
+        assert df_fac.iloc[0]["contacto_telefono"] == "123.0"
+
     def test_clean_carreras(self, cleaner):
         raw_facultades = [
             {

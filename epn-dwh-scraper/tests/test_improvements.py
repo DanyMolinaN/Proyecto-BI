@@ -167,6 +167,21 @@ class TestValidadorIntegridad:
 
 
 class TestEmparejamientoFacultad:
+    def test_nombre_facultad_nulo_no_interrumpe_limpieza_de_carreras(self):
+        cleaner = DataCleaner()
+        df_fac = cleaner.clean_facultades([
+            {"nombre": "Facultad de Ciencias", "sigla": "FC"},
+        ])
+        carreras = [
+            {"nombre": "Carrera con facultad", "facultad_nombre": "Facultad de Ciencias", "nivel": "Grado"},
+            {"nombre": "Carrera sin facultad", "facultad_nombre": None, "nivel": "Grado"},
+        ]
+
+        _, _, _, fact = cleaner.clean_carreras(carreras, df_fac)
+
+        assert fact.iloc[0]["facultad_key"] == df_fac.iloc[0]["facultad_key"]
+        assert pd.isna(fact.iloc[1]["facultad_key"])
+
     def test_ignora_tildes_y_variaciones_de_nombre(self):
         df_fac = DataCleaner().clean_facultades([
             {"nombre": "Facultad de Ingeniería Geología y Petróleos", "sigla": "FIGP"},

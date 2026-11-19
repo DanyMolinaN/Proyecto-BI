@@ -20,7 +20,9 @@ logger = setup_logger("cleaning")
 
 def _text_or_none(value: Any) -> Any:
     """Normaliza texto y devuelve None cuando no hay dato (nunca se inventa un valor)."""
-    return clean_text(value) or None
+    if value is None or (pd.api.types.is_scalar(value) and pd.isna(value)):
+        return None
+    return clean_text(str(value)) or None
 
 
 def _clean_columns(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
@@ -44,18 +46,19 @@ def _match_facultad_key(raw_name: Any, df_facultades: pd.DataFrame) -> Any:
     La comparacion ignora tildes y mayusculas, y admite variaciones menores de redaccion
     (ej: "Facultad de Geologia y Petroleos" vs "Facultad de Ingenieria Geologia y Petroleos").
     """
-    raw_norm = remove_accents(clean_text(raw_name)).lower()
-    if not raw_norm or df_facultades.empty:
+    raw_text = _text_or_none(raw_name)
+    if not raw_text or df_facultades.empty:
         return None
+    raw_norm = remove_accents(raw_text).lower()
     names = {
-        fac_row["facultad_key"]: remove_accents(clean_text(fac_row["nombre"])).lower()
+        fac_row["facultad_key"]: remove_accents(_text_or_none(fac_row["nombre"]) or "").lower()
         for _, fac_row in df_facultades.iterrows()
     }
     for key, fac_norm in sorted(names.items(), key=lambda kv: len(kv[1]), reverse=True):
         if fac_norm and (fac_norm in raw_norm or raw_norm in fac_norm):
             return key
     for _, fac_row in df_facultades.iterrows():
-        sigla = clean_text(fac_row["sigla"]).lower()
+        sigla = (_text_or_none(fac_row["sigla"]) or "").lower()
         if sigla and re.search(r"\b" + re.escape(sigla) + r"\b", raw_norm):
             return fac_row["facultad_key"]
     close = difflib.get_close_matches(raw_norm, list(names.values()), n=1, cutoff=0.8)

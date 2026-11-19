@@ -6,7 +6,7 @@ El presente reporte consolida los controles aplicados sobre el conjunto de dimen
 | Tabla | Registros | Claves Duplicadas | Nulos Totales | Estado |
 | :--- | :--- | :--- | :--- | :--- |
 | dim_tiempo | 7670 | 0 | 0 | CONFORME |
-| dim_facultad | 9 | 0 | 15 | CONFORME |
+| dim_facultad | 9 | 0 | 22 | CONFORME |
 | dim_carrera | 46 | 0 | 152 | CONFORME |
 | dim_nivel_formacion | 4 | 0 | 0 | CONFORME |
 | dim_modalidad | 2 | 0 | 0 | CONFORME |
@@ -14,7 +14,7 @@ El presente reporte consolida los controles aplicados sobre el conjunto de dimen
 | dim_autoridad | 10 | 0 | 20 | CONFORME |
 | dim_cargo | 10 | 0 | 0 | CONFORME |
 | fact_designacion_autoridades | 10 | 0 | 1 | CONFORME |
-| dim_categoria_noticia | 4 | 0 | 0 | CONFORME |
+| dim_categoria_noticia | 5 | 0 | 0 | CONFORME |
 | fact_comunicacion_institucional | 30 | 0 | 0 | CONFORME |
 
 ## Detalle de Observaciones y Reglas Evaluadas
@@ -23,8 +23,9 @@ El presente reporte consolida los controles aplicados sobre el conjunto de dimen
 
 ### dim_facultad
 - Info: decano sin dato en 1 de 9 registros (11%).
-- Info: subdecano sin dato en 4 de 9 registros (44%).
+- Info: subdecano sin dato en 2 de 9 registros (22%).
 - Info: departamentos_adscritos sin dato en 1 de 9 registros (11%).
+- Info: contacto_correo sin dato en 9 de 9 registros (100%).
 - Info: ubicacion_campus sin dato en 9 de 9 registros (100%).
 
 ### dim_carrera
